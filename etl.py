@@ -5,8 +5,17 @@ from sqlalchemy import create_engine, exc
 import urllib.parse
 import numpy as np
 from get_data import GetData
+import pathlib
+from datetime import datetime
+import logger as logger
+
 
 script_dir = os.path.dirname(__file__)
+
+# creates logs folder if it does not exist
+pathlib.Path("logs").mkdir(parents=True, exist_ok=True)
+log = logger.setup_applevel_logger(
+    file_name='logs/app_debug_{}.log'.format(str(datetime.now().strftime("%m-%d-%Y-%H-%M-%S"))))
 
 
 class Etl:
@@ -33,11 +42,13 @@ class Etl:
         P.S.: If dealing with big data, best approach would be to load data with
         pyspark"""
         try:
+            log.debug('Opening file')
             return pd.read_csv("./data/data.csv", na_values=['null', None],
                                encoding=self.ENCODING)
         except FileNotFoundError:
+            log.debug('File not found. Creating file')
             GetData(self.NUMBER_USERS).get_users_data_from_api()
-            return pd.read_csv("./data/data.csv", na_values=['null', None], encoding='utf-8', )
+            return pd.read_csv("./data/data.csv", na_values=['null', None], encoding='utf-8')
 
     def rename_columns(self, data):
         """Rename columns removing '.' and replacing by '_'"""
@@ -83,6 +94,7 @@ class Etl:
     def load_data_table_male_female(self):
         try:
             with self.ENGINE.connect() as connection:
+                log.debug('Creating male/female tables')
                 self.create_db_table('create_male_female_tbl.sql')
                 df_male, df_female = self.split_dataframe_male_female()
                 df_male.to_sql(con=connection, schema='interview', name=f'{self.TABLES_PREFIX}_male',
@@ -92,6 +104,7 @@ class Etl:
                                  if_exists='append',
                                  index=False)
         except exc.IntegrityError:
+            log.error('Duplicated data')
             raise Exception(f'The same data has already been uploaded to table.')
 
     def slice_dataframe(self, df) -> dict:
@@ -131,17 +144,20 @@ class Etl:
         age group"""
         try:
             with self.ENGINE.connect() as connection:
+                log.debug('Loading table age groups')
                 self.create_subset_tables_by_age_group()
                 for age_group, df in self.split_dataset_by_age_group().items():
                     table_name = f'{self.TABLES_PREFIX}_{age_group}'
                     df.to_sql(con=connection, schema='interview', name=table_name, if_exists='append',
                               index=False)
         except exc.IntegrityError:
+            log.error('Repeated data')
             raise Exception(f'The same data has already been uploaded to table {table_name}.')
 
     def load_top20_users_table(self):
         try:
             with self.ENGINE.connect() as connection:
+                log.debug('Loading table Top 20')
                 table_name = f'{self.TABLES_PREFIX}_20'
                 self.create_db_table('create_top_20_male_female_tbl.sql')
                 query_file = open(self.get_query_absolute_path('get_top_20_male_female_tbl.sql'))
@@ -149,16 +165,19 @@ class Etl:
                 query_data.to_sql(con=connection, schema='interview', name=table_name, if_exists='append',
                                   index=False)
         except exc.IntegrityError:
+            log.error('Repeated data')
             raise Exception(f'The same data has already been uploaded to table {table_name}.')
 
     def combine_tables_20_and_5(self):
         with self.ENGINE.connect() as connection:
+            log.debug('Combining tables 20 & 5')
             query_file = open(self.get_query_absolute_path('get_combined_tables_20_and_5.sql'))
             query_data = pd.read_sql(query_file.read(), connection)
             query_data.to_json(r'./data/first.json')
 
     def combine_tables_20_and_2(self):
         with self.ENGINE.connect() as connection:
+            log.debug('Combining tables 20 & 2')
             query_file = open(self.get_query_absolute_path('get_combined_tables_20_and_2.sql'))
             query_data = pd.read_sql(query_file.read(), connection)
             query_data.to_json(r'./data/second.json')
