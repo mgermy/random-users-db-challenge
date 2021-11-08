@@ -8,6 +8,7 @@ import os
 from sqlalchemy import create_engine, exc
 import urllib.parse
 import numpy as np
+from utils.http_errors import HttpStatusCode
 
 script_dir = os.path.dirname(__file__)
 
@@ -31,8 +32,9 @@ class GetData:
     def get_users_data_from_api(self):
         session = requests.Session()
 
-# todo is there any enumeration of http status codes in python
-        retries = Retry(total=self.GET_USER_RETRIES_NUMBER, backoff_factor=1, status_forcelist=[502, 503, 504])
+        retries = Retry(total=self.GET_USER_RETRIES_NUMBER, backoff_factor=1,
+                        status_forcelist=[HttpStatusCode.BAD_GATEWAY.value, HttpStatusCode.SERVICE_UNAVAILABLE.value,
+                                          HttpStatusCode.GATEWAY_TIMEOUT.value])
         session.mount('http://', HTTPAdapter(max_retries=retries))
         url = f'https://randomuser.me/api/?results={self.number_users}&format=csv'
         response = session.get(url)
@@ -40,6 +42,7 @@ class GetData:
 
 
 class Etl:
+    TABLES_PREFIX = 'MICHELL_test'
     HOST = config('HOST')
     USER = config('DB_USER')
     PASSWORD = urllib.parse.quote_plus(config('DB_PASSWORD'))
@@ -69,6 +72,11 @@ class Etl:
         data.columns = cols_renamed
 
     def transform_datetimes(self, data):
+        """
+        Convert to unix time for easier manipulation of datetimes
+        :param data:
+        :return:
+        """
         # TODO extract to function
         data['registered_date'] = (pd.to_datetime(data.registered_date) - pd.Timestamp("1970-01-01",
                                                                                        tz="UTC")) // pd.Timedelta('1s')
@@ -80,7 +88,7 @@ class Etl:
         self.transform_datetimes(data)
         return data
 
-# TODO include what kind of splitting this is should include the word data frame
+    # TODO include what kind of splitting this is should include the word data frame
     def split_dataset(self):
         """
         Splits dataset into male and females
@@ -89,40 +97,46 @@ class Etl:
 
         return data[data.gender == 'male'], data[data.gender == 'female']
 
-    def create_table_male_female(self):
-        """Creates a table for females and another for males"""
+    def create_db_table(self, query_name: str):
+        """Creates table in the db"""
 
-        rel_path = 'sql_queries/create_male_female_tbl.sql'
+        rel_path = f'sql_queries/{query_name}'
         abs_file_path = os.path.join(script_dir, rel_path)
-        # TODO rename query to query_file
-        query = open(abs_file_path, 'r')
+        query_file = open(abs_file_path, 'r')
 
         with self.engine.connect() as connection:
-            connection.execute(query.read())
+            connection.execute(query_file.read())
 
     def load_data_table_male_female(self):
         try:
             with self.engine.connect() as connection:
-                self.create_table_male_female()
+                self.create_db_table('create_male_female_tbl.sql')
                 df_male, df_female = self.split_dataset()
-                #todo michell prexif should be a constant or a function or both
-                df_male.to_sql(con=connection, schema='interview', name='MICHELL_test_male', if_exists='append', index=False)
-                df_female.to_sql(con=connection, schema='interview', name='MICHELL_test_female', if_exists='append', index=False)
+                # todo michell prexif should be a constant or a function or both
+                df_male.to_sql(con=connection, schema='interview', name=f'{self.TABLES_PREFIX}_male', if_exists='append',
+                               index=False)
+                df_female.to_sql(con=connection, schema='interview', name=f'{self.TABLES_PREFIX}_female', if_exists='append',
+                                 index=False)
         except exc.IntegrityError:
             # todo missing information which table and which data
             raise Exception('This data has already been uploaded to this table. There are repeated users.')
 
     def slice_dataframe(self, df):
+        DECREASE_DECIMAL = 10
+
         df_sliced_dict = {}
         for age_group in df['age_group'].unique():
-            df_sliced_dict[int(age_group)] = df[df['age_group'] == age_group].drop('age_group', axis=1)
+            df_sliced_dict[int(age_group / DECREASE_DECIMAL)] = df[df['age_group'] == age_group].drop('age_group',
+                                                                                                      axis=1)
         return df_sliced_dict
 
     def split_dataset_by_age_group(self) -> dict:
         df = self.transform_dataset().sort_values('dob_age')
         # todo name constants
-        bins = np.linspace(10, 100, num=10)
-        labels = bins[1:]
+        # bins: 0-9, 10-19, 20-29,..., 90-100
+        bins = np.linspace(9, 100, num=10)
+        # labels: 0s, 10s, 20s, 30s,..., 90s
+        labels = bins[:len(bins)-1]+1
         df['age_group'] = pd.cut(df['dob_age'], bins=bins, labels=labels)
 
         return self.slice_dataframe(df)
@@ -140,16 +154,51 @@ class Etl:
             connection.close()
 
     def load_table_by_age_group(self):
-        self.create_subset_tables_by_age_group()
         try:
             with self.engine.connect() as connection:
+                self.create_subset_tables_by_age_group()
                 for age_group, df in self.split_dataset_by_age_group().items():
-                    df.to_sql(con=connection, schema='interview', name=f'MICHELL_test_{age_group}', if_exists='append', index=False)
+                    table_name = f'{self.TABLES_PREFIX}_{age_group}'
+                    df.to_sql(con=connection, schema='interview', name=table_name, if_exists='append',
+                              index=False)
         except exc.IntegrityError:
-            # TODO not informative
-            raise Exception('This data has already been uploaded to this table. There are repeated users.')
+            raise Exception(f'The same data has already been uploaded to table {table_name}.')
+
+    def get_query_absolute_path(self, query_name):
+        rel_path = f'sql_queries/{query_name}'
+        abs_file_path = os.path.join(script_dir, rel_path)
+
+        return abs_file_path
+
+    def load_top20_users_table(self):
+        try:
+            with self.engine.connect() as connection:
+                table_name = f'{self.TABLES_PREFIX}_20'
+                self.create_db_table('create_top_20_male_female_tbl.sql')
+                query_file = open(self.get_query_absolute_path('get_top_20_male_female_tbl.sql'))
+                query_data = pd.read_sql(query_file.read(), connection)
+                query_data.to_sql(con=connection, schema='interview', name=table_name, if_exists='append',
+                                  index=False)
+        except exc.IntegrityError:
+            raise Exception(f'The same data has already been uploaded to table {table_name}.')
+
+    def combine_tables_20_and_5(self):
+        with self.engine.connect() as connection:
+            query_file = open(self.get_query_absolute_path('get_combined_tables_20_and_5.sql'))
+            query_data = pd.read_sql(query_file.read(), connection)
+            query_data.to_json(r'./data/first.json')
+
+    def combine_tables_20_and_2(self):
+        # Todo test function
+        with self.engine.connect() as connection:
+            query_file = open(self.get_query_absolute_path('get_combined_tables_20_and_2.sql'))
+            query_data = pd.read_sql(query_file.read(), connection)
+            query_data.to_json(r'./data/second.json')
 
 
 if __name__ == "__main__":
     # Etl().load_data_table_male_female()
-    Etl().load_table_by_age_group()
+    # Etl().load_table_by_age_group()
+    # Etl().load_top20_users_table()
+    # Etl().combine_tables_20_and_5()
+    Etl().combine_tables_20_and_2()
