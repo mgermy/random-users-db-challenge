@@ -130,7 +130,8 @@ class Etl:
         return self.slice_dataframe(df)
 
     def create_subset_tables_by_age_group(self):
-        """For each age group creates a table in the database."""
+        """For each age group creates a table in the database. The table is only created if there's data for the
+        specific age group."""
 
         for age_group in self.split_dataset_by_age_group().keys():
             connection = self.ENGINE.connect()
