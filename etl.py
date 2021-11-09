@@ -117,15 +117,15 @@ class Etl:
         return df_sliced_dict
 
     def split_dataset_by_age_group(self) -> dict:
-        lower_boundary_bins = 9
+        lower_boundary_bins = 10
         upper_boundary_bins = 100
 
         df = self.transform_dataset().sort_values('dob_age')
-        # bins: 0-9, 10-19, 20-29,..., 90-100
+        # bins: 10-19, 20-29,..., 90-100
         bins = np.linspace(lower_boundary_bins, upper_boundary_bins, num=10)
         # labels: 10s, 20s, 30s,..., 90s
-        labels = bins[:len(bins) - 1] + 1
-        df['age_group'] = pd.cut(df['dob_age'], bins=bins, labels=labels)
+        labels = bins[:len(bins) - 1]
+        df['age_group'] = pd.cut(df['dob_age'], bins=bins, labels=labels, right=False)
 
         return self.slice_dataframe(df)
 
